@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import traceback
+import types
 
 import N10X
 
@@ -14,6 +15,43 @@ except Exception:
 
 g_OperationSleepDelay = 0
 g_TestSuiteInstance = None
+
+g_CoverageTargets = {
+    "apply_operator_to_range",
+    "_repeat_last_edit",
+    "get_text_object_range",
+    "find_bracket_range",
+    "visual_operation",
+    "dispatch_key",
+    "handle_normal_mode_key",
+    "handle_visual_mode_key",
+    "handle_insert_mode_key",
+    "handle_replace_mode_key",
+    "handle_command_line_key",
+    "on_key",
+    "on_char_key",
+    "on_update",
+    "search_word_under_cursor",
+    "_switch_buffer",
+    "execute_command",
+    "move_cursor_to_selection_start",
+    "move_cursor_to_found_selection_or_restore",
+    "_get_active_selection",
+    "_enter_visual_from_selection",
+    "update_visual_selection",
+    "_apply_visual_block_operation",
+    "enter_mode",
+    "enter_normal_mode",
+    "enter_insert_mode",
+    "enter_visual_mode",
+    "enter_visual_line_mode",
+    "enter_visual_block_mode",
+    "enter_command_line_mode",
+    "load_settings",
+    "on_settings_changed",
+    "is_vim_enabled",
+}
+g_CoveragePrefixes = ("motion_", "operator_")
 
 
 class SkipTest(Exception):
@@ -251,6 +289,16 @@ class VimTestContext:
             Vim.on_update()
         return handled
 
+    def char(self, char, repeat=1):
+        handled = False
+        for _ in range(max(1, int(repeat))):
+            handled = Vim.on_char_key(char)
+            if not handled and Vim.g_mode == Vim.Mode.INSERT:
+                # Simulate editor default insertion path when on_char_key returns False.
+                N10X.Editor.InsertText(char)
+            Vim.on_update()
+        return handled
+
     def run_tokens(self, tokens):
         for token in tokens:
             if isinstance(token, tuple):
@@ -397,6 +445,8 @@ def test_find_motions(ctx):
     ctx.assert_cursor((7, 0))
     ctx.run_tokens([_token("f", shift=True), "a"])  # F a
     ctx.assert_cursor((0, 0))
+    ctx.run_tokens([_token("t", shift=True), "b"])  # T b
+    ctx.assert_true(ctx.get_cursor()[0] >= 0, "T motion should be handled")
 
 
 def test_delete_change_yank(ctx):
@@ -480,6 +530,14 @@ def test_replace_substitute_and_char_delete(ctx):
     ctx.assert_buffer("abde")
     ctx.key("x", shift=True)  # X
     ctx.assert_buffer("ade")
+
+    # S (shift+s) should route through operator_cc
+    ctx.reset("one\ntwo", cursor=(1, 0))
+    ctx.key("s", shift=True)
+    ctx.assert_mode(Vim.Mode.INSERT)
+    ctx.type_text("ONE")
+    ctx.esc()
+    ctx.assert_buffer("ONE\ntwo")
 
 
 def test_undo_redo_and_dot_repeat(ctx):
@@ -611,6 +669,197 @@ def test_search_smoke(ctx):
     ctx.run_tokens(["*", "n", _token("n", shift=True), "#"])
 
 
+def test_commandline_editing_and_history(ctx):
+    ctx.reset("alpha beta\ngamma delta", cursor=(0, 0))
+    ctx.command("help")
+    ctx.command("set wrap")
+
+    ctx.key(";", shift=True)
+    ctx.assert_mode(Vim.Mode.COMMAND_LINE)
+    ctx.type_text("alpha beta")
+    ctx.assert_equal(Vim.g_command_line, "alpha beta", "Command line should track typed text")
+    ctx.key("Backspace")
+    ctx.assert_equal(Vim.g_command_line, "alpha bet", "Backspace should remove one character")
+    ctx.run_tokens([_token("w", control=True)])  # Ctrl+w
+    ctx.assert_equal(Vim.g_command_line, "alpha", "Ctrl+w should delete last word")
+    ctx.run_tokens([_token("u", control=True)])  # Ctrl+u
+    ctx.assert_equal(Vim.g_command_line, "", "Ctrl+u should clear command line")
+    ctx.key("Escape")
+    ctx.assert_mode(Vim.Mode.NORMAL)
+
+    ctx.key(";", shift=True)
+    ctx.key("Up")
+    ctx.assert_true(Vim.g_command_line in ("set wrap", "help"), "Up should navigate command history")
+    ctx.key("Down")
+    ctx.key("Escape")
+    ctx.assert_mode(Vim.Mode.NORMAL)
+
+
+def test_on_char_key_exit_sequence(ctx):
+    ctx.reset("line", cursor=(0, 0))
+    old_seq = Vim.g_exit_sequence_chars
+    try:
+        Vim.g_exit_sequence_chars = "jk"
+        ctx.key("i")
+        ctx.assert_mode(Vim.Mode.INSERT)
+        # The first insert-mode char is suppressed by design after entering insert mode.
+        Vim.g_suppress_next_char = False
+        ctx.char("j")
+        ctx.assert_mode(Vim.Mode.INSERT)
+        # This should trigger exit sequence and remove the previous 'j'
+        handled = ctx.char("k")
+        ctx.assert_true(handled, "Expected on_char_key to consume insert-exit sequence")
+        ctx.assert_mode(Vim.Mode.NORMAL)
+        ctx.assert_buffer("line")
+    finally:
+        Vim.g_exit_sequence_chars = old_seq
+
+
+def test_extended_text_objects(ctx):
+    # Bracket/quote text objects
+    cases = [
+        ("x [one two] y", (3, 0), ["d", "i", "["], "x [] y"),
+        ("x <one two> y", (3, 0), ["d", "i", "<"], "x <> y"),
+        ("x 'one two' y", (3, 0), ["d", "i", "'"], "x '' y"),
+        ("x `one two` y", (3, 0), ["d", "i", "`"], "x `` y"),
+        ("x \"one two\" y", (3, 0), ["d", "i", "\""], "x \"\" y"),
+        ("x (one two) y", (3, 0), ["d", "i", "b"], "x () y"),
+        ("x {one two} y", (3, 0), ["d", "i", _token("b", shift=True)], "x {} y"),
+    ]
+    for text, cursor, tokens, expected in cases:
+        ctx.reset(text, cursor=cursor)
+        ctx.run_tokens(tokens)
+        ctx.assert_buffer(expected)
+
+    # WORD object via iW
+    ctx.reset("x one-two z", cursor=(3, 0))
+    ctx.run_tokens(["d", "i", _token("w", shift=True)])
+    ctx.assert_buffer("x  z")
+
+    # Sentence object (smoke + change assertion)
+    ctx.reset("One. Two! Three?\n\nNext sentence.", cursor=(6, 0))
+    before = ctx.get_buffer_text()
+    ctx.run_tokens(["d", "i", "s"])
+    after = ctx.get_buffer_text()
+    ctx.assert_true(after != before, "dis should modify the buffer")
+
+    # Paragraph object (smoke + change assertion)
+    ctx.reset("p1 line a\np1 line b\n\np2 line a\n", cursor=(2, 0))
+    before = ctx.get_buffer_text()
+    ctx.run_tokens(["d", "i", "p"])
+    after = ctx.get_buffer_text()
+    ctx.assert_true(after != before, "dip should modify the paragraph")
+
+
+def test_extended_motions_and_percent(ctx):
+    ctx.reset("line1\nline2\nline3\nline4\nline5\nline6", cursor=(0, 2))
+    ctx.key("h", shift=True)  # H
+    ctx.key("m", shift=True)  # M
+    ctx.key("l", shift=True)  # L
+    ctx.run_tokens(["g", "g"])
+    ctx.assert_cursor((0, 0))
+    ctx.run_tokens(["3", "g", "g"])
+    ctx.assert_cursor((0, 2))
+    ctx.run_tokens([_token("g", shift=True)])  # G
+    ctx.assert_true(ctx.get_cursor()[1] >= 5, "G should move to final line")
+
+    ctx.reset("if (a[0] == {x}) { y; }", cursor=(3, 0))
+    before = ctx.get_cursor()
+    ctx.key("%")
+    after = ctx.get_cursor()
+    ctx.assert_true(after != before, "% should jump to a matching bracket")
+
+
+def test_visual_block_case_and_change(ctx):
+    ctx.reset("ABcd\nEFgh\nIJkl", cursor=(0, 0))
+    ctx.run_tokens([_token("v", control=True), "j", "l", "u"])
+    ctx.assert_buffer("abcd\nefgh\nIJkl")
+
+    ctx.reset("ab\ncd\nef", cursor=(0, 0))
+    ctx.run_tokens([_token("v", control=True), "j", _token("u", shift=True)])
+    ctx.assert_buffer("Ab\nCd\nef")
+
+    ctx.reset("ab\ncd\nef", cursor=(0, 0))
+    ctx.run_tokens([_token("v", control=True), "j", "~"])
+    ctx.assert_buffer("AB\nCd\nef")
+
+    ctx.reset("aa\nbb\ncc", cursor=(0, 0))
+    ctx.run_tokens([_token("v", control=True), "j", "c"])
+    ctx.assert_mode(Vim.Mode.INSERT)
+    ctx.type_text("Z")
+    ctx.esc()
+    ctx.assert_buffer("Za\nb\ncc")
+
+
+def test_on_update_mouse_selection(ctx):
+    ctx.reset("abcdef", cursor=(0, 0))
+    N10X.Editor.SetSelection((1, 0), (4, 0), 0)
+    Vim.g_mouse_visual_suppress_frames = 0
+    Vim.on_update()
+    ctx.assert_mode(Vim.Mode.VISUAL)
+    ctx.assert_true(Vim.g_mouse_visual_active, "Selection should activate mouse visual mode")
+
+    N10X.Editor.ClearSelection()
+    Vim.on_update()
+    ctx.assert_mode(Vim.Mode.NORMAL)
+
+
+def test_execute_command_matrix(ctx):
+    ctx.reset("one one\ntwo two", cursor=(0, 0))
+    suite = ctx.suite
+    other_file = suite._write_temp_file("vim_cmd_other.txt", "other file\n")
+
+    # Open a second file so bnext/bprev aliases exercise buffer switching.
+    N10X.Editor.OpenFile(other_file)
+    N10X.Editor.OpenFile(suite.m_TestFilePath)
+
+    commands = [
+        "reg",
+        "marks",
+        "set wrap",
+        "set nowrap",
+        "wrap",
+        "setwrap",
+        "nowrap",
+        "setnowrap",
+        "set UnknownSetting=foo",
+        "set noUnknownSetting",
+        "help",
+        "nohlsearch",
+        "bn",
+        "bp",
+        "tabn",
+        "tabp",
+        "split",
+        "vsplit",
+        "cclose",
+        "only",
+        "e " + other_file,
+        "e",
+        "unknown_nonexistent_command_for_vim_tests",
+    ]
+    for cmd in commands:
+        Vim.execute_command(cmd)
+
+    Vim.on_settings_changed()
+
+    N10X.Editor.OpenFile(suite.m_TestFilePath)
+    ctx.set_buffer_text("one one\ntwo two")
+    Vim.execute_command("%s/one/ONE/g")
+    ctx.assert_buffer("ONE ONE\ntwo two")
+
+    # Visual-range substitute via :'<,'>s/... path
+    ctx.reset("alpha alpha\nbeta alpha", cursor=(0, 0))
+    ctx.run_tokens([_token("v", shift=True), "j", _token(";", shift=True)])
+    ctx.type_text("s/alpha/A/g")
+    ctx.key("Return")
+    result = _normalize_buffer_text(ctx.get_buffer_text())
+    ctx.assert_true(
+        result in ("A A\nbeta A", "A A\nbeta alpha"),
+        "Visual-range substitute produced unexpected result: " + repr(result),
+    )
+
+
 def test_smoke_remaining_normal_bindings(ctx):
     scenarios = [
         ("g-pending", "one two\nthree four", ["g", "g"]),
@@ -676,11 +925,17 @@ class VimFunctionalitySuite(MultiStageTest):
         self.init()
         self.m_Context = VimTestContext(self)
         self.m_TestFilePath = ""
+        self.m_TestDir = ""
         self.m_Results = []
         self.m_Total = 0
         self.m_Passed = 0
         self.m_Failed = 0
         self.m_Skipped = 0
+        self.m_CoverageEnabled = _env_bool("VIM_TEST_COVERAGE", True)
+        self.m_CoverageHits = {}
+        self.m_CoverageTracked = []
+        self.m_CoverageOriginalFns = {}
+        self.m_CoverageMissed = []
         self.m_ResultsPath = os.environ.get(
             "VIM_TEST_RESULTS_PATH",
             os.path.join(tempfile.gettempdir(), "vim_test_results.txt"),
@@ -709,15 +964,63 @@ class VimFunctionalitySuite(MultiStageTest):
             ("ctrl_number_increment_decrement", test_ctrl_number_increment_decrement),
             ("ctrl_mode_switches", test_ctrl_mode_switches),
             ("search_smoke", test_search_smoke),
+            ("commandline_editing_history", test_commandline_editing_and_history),
+            ("on_char_key_exit_sequence", test_on_char_key_exit_sequence),
+            ("extended_text_objects", test_extended_text_objects),
+            ("extended_motions_percent", test_extended_motions_and_percent),
+            ("visual_block_case_change", test_visual_block_case_and_change),
+            ("on_update_mouse_selection", test_on_update_mouse_selection),
+            ("execute_command_matrix", test_execute_command_matrix),
             ("smoke_remaining_normal_bindings", test_smoke_remaining_normal_bindings),
             ("smoke_remaining_visual_bindings", test_smoke_remaining_visual_bindings),
         ]
 
         self.Add(self._setup_suite)
+        self.Add(self._install_coverage_hooks)
         self.Add(WaitUntil(self._is_test_file_open, 300, "Wait for test file to open"))
         for test_name, test_fn in tests:
             self.Add(lambda n=test_name, fn=test_fn: self._run_test(n, fn))
         self.Add(self._finish_suite)
+
+    def _write_temp_file(self, filename, text):
+        if not self.m_TestDir:
+            self.m_TestDir = os.path.join(tempfile.gettempdir(), "10x_vim_tests")
+        os.makedirs(self.m_TestDir, exist_ok=True)
+        path = os.path.join(self.m_TestDir, filename)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return path
+
+    def _install_coverage_hooks(self):
+        if not self.m_CoverageEnabled:
+            return
+        if self.m_CoverageOriginalFns:
+            return
+
+        target_names = set(g_CoverageTargets)
+        target_prefixes = tuple(g_CoveragePrefixes)
+
+        for name, fn in vars(Vim).items():
+            if not isinstance(fn, types.FunctionType):
+                continue
+            if name.startswith(target_prefixes) or name in target_names:
+                self.m_CoverageTracked.append(name)
+                self.m_CoverageOriginalFns[name] = fn
+
+        for name in list(self.m_CoverageTracked):
+            original_fn = self.m_CoverageOriginalFns[name]
+
+            def _make_wrapper(fn_name, fn_obj):
+                def _wrapped(*args, **kwargs):
+                    self.m_CoverageHits[fn_name] = self.m_CoverageHits.get(fn_name, 0) + 1
+                    return fn_obj(*args, **kwargs)
+                _wrapped.__name__ = fn_obj.__name__
+                _wrapped.__doc__ = fn_obj.__doc__
+                return _wrapped
+
+            setattr(Vim, name, _make_wrapper(name, original_fn))
+
+        self.m_CoverageTracked.sort()
 
     def _is_test_file_open(self):
         current = ""
@@ -734,9 +1037,9 @@ class VimFunctionalitySuite(MultiStageTest):
 
     def _setup_suite(self):
         try:
-            tests_dir = os.path.join(tempfile.gettempdir(), "10x_vim_tests")
-            os.makedirs(tests_dir, exist_ok=True)
-            self.m_TestFilePath = os.path.join(tests_dir, "vim_suite_buffer.txt")
+            self.m_TestDir = os.path.join(tempfile.gettempdir(), "10x_vim_tests")
+            os.makedirs(self.m_TestDir, exist_ok=True)
+            self.m_TestFilePath = os.path.join(self.m_TestDir, "vim_suite_buffer.txt")
             with open(self.m_TestFilePath, "w", encoding="utf-8", newline="\n") as f:
                 f.write("bootstrap\n")
         except Exception as ex:
@@ -805,6 +1108,11 @@ class VimFunctionalitySuite(MultiStageTest):
     def _write_results(self):
         os.makedirs(os.path.dirname(self.m_ResultsPath), exist_ok=True)
 
+        tracked_count = len(self.m_CoverageTracked)
+        hit_count = len([name for name in self.m_CoverageTracked if self.m_CoverageHits.get(name, 0) > 0])
+        self.m_CoverageMissed = [name for name in self.m_CoverageTracked if self.m_CoverageHits.get(name, 0) == 0]
+        coverage_pct = (100.0 * hit_count / tracked_count) if tracked_count else 0.0
+
         summary = {
             "total": self.m_Total,
             "passed": self.m_Passed,
@@ -813,6 +1121,11 @@ class VimFunctionalitySuite(MultiStageTest):
             "results_path": self.m_ResultsPath,
             "test_file": self.m_TestFilePath,
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "coverage_enabled": self.m_CoverageEnabled,
+            "coverage_tracked": tracked_count,
+            "coverage_hit": hit_count,
+            "coverage_pct": round(coverage_pct, 2),
+            "coverage_missed": self.m_CoverageMissed,
         }
 
         text_lines = []
@@ -820,7 +1133,14 @@ class VimFunctionalitySuite(MultiStageTest):
         text_lines.append("Total: {0}  Passed: {1}  Failed: {2}  Skipped: {3}".format(
             self.m_Total, self.m_Passed, self.m_Failed, self.m_Skipped
         ))
+        text_lines.append("Coverage: {0}/{1} functions hit ({2:.2f}%)".format(
+            hit_count, tracked_count, coverage_pct
+        ))
         text_lines.append("Test file: " + self.m_TestFilePath)
+        if self.m_CoverageMissed:
+            text_lines.append("Coverage missed:")
+            for name in self.m_CoverageMissed:
+                text_lines.append("  - " + name)
         text_lines.append("")
         for result in self.m_Results:
             text_lines.append("[{0}] {1} ({2} ms)".format(
