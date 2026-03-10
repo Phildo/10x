@@ -3693,9 +3693,10 @@ def handle_normal_mode_key(key):
         if is_shifted:
             # D = delete to end of line (d$)
             start = get_cursor_pos()
-            motion_dollar(1)
+            motion_dollar(count)
             end = get_cursor_pos()
-            apply_operator_to_range('d', start, (end[0] + 1, end[1]), False)
+            edit_info = {'motion': '$', 'count': count}
+            apply_operator_to_range('d', start, (end[0] + 1, end[1]), False, edit_info)
         else:
             g_operator = char
             g_pending_motion = char
