@@ -695,6 +695,29 @@ def test_commandline_editing_and_history(ctx):
     ctx.assert_mode(Vim.Mode.NORMAL)
 
 
+def test_uppercase_ex_commands(ctx):
+    ctx.reset("one\ntwo", cursor=(0, 0))
+    other_file = ctx.suite._write_temp_file("vim_cmd_uppercase.txt", "other file\n")
+
+    N10X.Editor.OpenFile(other_file)
+    N10X.Editor.OpenFile(ctx.suite.m_TestFilePath)
+
+    ctx.key("i")
+    ctx.char("!")
+    ctx.esc()
+    ctx.assert_true(N10X.Editor.IsModified(), "Editing should mark the file modified before :W")
+
+    ctx.command("W")
+    ctx.assert_true(not N10X.Editor.IsModified(), "Uppercase :W should save the current file")
+
+    open_files_before = set(N10X.Editor.GetOpenFiles())
+    ctx.assert_true(ctx.suite.m_TestFilePath in open_files_before, "Test file should be open before :WQ")
+
+    ctx.command("WQ")
+    open_files_after = set(N10X.Editor.GetOpenFiles())
+    ctx.assert_true(ctx.suite.m_TestFilePath not in open_files_after, "Uppercase :WQ should close the current file")
+
+
 def test_on_char_key_exit_sequence(ctx):
     ctx.reset("line", cursor=(0, 0))
     old_seq = Vim.g_exit_sequence_chars
@@ -965,6 +988,7 @@ class VimFunctionalitySuite(MultiStageTest):
             ("ctrl_mode_switches", test_ctrl_mode_switches),
             ("search_smoke", test_search_smoke),
             ("commandline_editing_history", test_commandline_editing_and_history),
+            ("uppercase_ex_commands", test_uppercase_ex_commands),
             ("on_char_key_exit_sequence", test_on_char_key_exit_sequence),
             ("extended_text_objects", test_extended_text_objects),
             ("extended_motions_percent", test_extended_motions_and_percent),

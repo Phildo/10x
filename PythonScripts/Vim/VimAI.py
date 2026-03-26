@@ -2344,19 +2344,21 @@ def execute_command(cmd):
     command = parts[0] if parts else ""
     args = parts[1] if len(parts) > 1 else ""
 
-    # Normalize command aliases
-    command = COMMAND_ALIASES.get(command, command)
+    # Vim ex commands are case-insensitive; keep the original text for any
+    # fallback 10x command execution, but normalize the command keyword here.
+    command_key = command.lower()
+    command_key = COMMAND_ALIASES.get(command_key, command_key)
 
     # Handle line number
-    if command.isdigit():
-        line_num = int(command)
+    if command_key.isdigit():
+        line_num = int(command_key)
         set_cursor_pos(0, line_num - 1)
         motion_caret()
         return
 
     # Handle range commands (e.g., :1,10d)
-    if ',' in command:
-        range_match = command.split(',')
+    if ',' in command_key:
+        range_match = command_key.split(',')
         if len(range_match) == 2:
             try:
                 start = int(range_match[0])
@@ -2383,32 +2385,32 @@ def execute_command(cmd):
                 pass
 
     # Standard commands
-    if command == 'w':
+    if command_key == 'w':
         if args:
             # Save as - not directly supported, just save current
             set_status(f"Save as not supported, saving current file")
         N10X.Editor.SaveFile()
         set_status("File saved")
 
-    elif command == 'wa':
+    elif command_key == 'wa':
         N10X.Editor.SaveAll()
         set_status("All files saved")
 
-    elif command == 'q':
+    elif command_key == 'q':
         if N10X.Editor.IsModified():
             set_status("No write since last change (use :q! to override)")
         else:
             N10X.Editor.CloseFile()
 
-    elif command == 'q!':
+    elif command_key == 'q!':
         N10X.Editor.DiscardUnsavedChanges()
         N10X.Editor.CloseFile()
 
-    elif command == 'wq':
+    elif command_key == 'wq':
         N10X.Editor.SaveFile()
         N10X.Editor.CloseFile()
 
-    elif command == 'qa':
+    elif command_key == 'qa':
         # Check if any files are modified
         try:
             open_files = N10X.Editor.GetOpenFiles()
@@ -2425,17 +2427,17 @@ def execute_command(cmd):
             pass
         N10X.Editor.Exit(False)
 
-    elif command == 'qa!':
+    elif command_key == 'qa!':
         N10X.Editor.DiscardAllUnsavedChanges()
         N10X.Editor.Exit(True)
 
-    elif command == 'e':
+    elif command_key == 'e':
         if args:
             N10X.Editor.OpenFile(args)
         else:
             N10X.Editor.CheckForModifiedFiles()
 
-    elif command == 'vsplit':
+    elif command_key == 'vsplit':
         # Vertical split (side by side)
         if args:
             N10X.Editor.ExecuteCommand("DuplicatePanelRight")
@@ -2443,7 +2445,7 @@ def execute_command(cmd):
         else:
             N10X.Editor.ExecuteCommand("DuplicatePanelRight")
 
-    elif command == 'split':
+    elif command_key == 'split':
         # Horizontal split - 10x doesn't have DuplicatePanelDown, so use DuplicatePanel
         # which duplicates in place, or fall back to column-based split
         if args:
@@ -2452,22 +2454,22 @@ def execute_command(cmd):
         else:
             N10X.Editor.ExecuteCommand("DuplicatePanel")
 
-    elif command == 'bnext':
+    elif command_key == 'bnext':
         _switch_buffer(1)
 
-    elif command == 'bprev':
+    elif command_key == 'bprev':
         _switch_buffer(-1)
 
-    elif command == 'bdelete':
+    elif command_key == 'bdelete':
         N10X.Editor.CloseFile()
 
-    elif command == 'nohlsearch':
+    elif command_key == 'nohlsearch':
         set_status("")
 
-    elif command in ('wrap', 'setwrap', 'nowrap', 'setnowrap'):
+    elif command_key in ('wrap', 'setwrap', 'nowrap', 'setnowrap'):
         N10X.Editor.ExecuteCommand("ToggleWordWrapForCurrentPanel")
 
-    elif command == 'set':
+    elif command_key == 'set':
         if args:
             if args == 'wrap':
                 N10X.Editor.ExecuteCommand("ToggleWordWrapForCurrentPanel")
@@ -2491,24 +2493,24 @@ def execute_command(cmd):
                 except Exception:
                     pass
 
-    elif command == 'registers':
+    elif command_key == 'registers':
         reg_info = [f'"{r}: {v[:30].replace(chr(10), "^J")}' for r, v in g_registers.items() if v]
         set_status(" | ".join(reg_info) if reg_info else "Registers empty")
 
-    elif command == 'marks':
+    elif command_key == 'marks':
         mark_info = []
         for m, (f, pos) in g_marks.items():
             mark_info.append(f"'{m}: {pos[1]+1}:{pos[0]}")
         set_status(" | ".join(mark_info) if mark_info else "No marks")
 
-    elif command == '%':
+    elif command_key == '%':
         # Select all and apply next command
         pass
 
-    elif command.startswith('s/') or command.startswith('%s/'):
+    elif command_key.startswith('s/') or command_key.startswith('%s/'):
         # Substitute command
         import re
-        substitute_cmd = command
+        substitute_cmd = command_key
         is_global_file = substitute_cmd.startswith('%')
         if is_global_file:
             substitute_cmd = substitute_cmd[1:]
@@ -2611,29 +2613,29 @@ def execute_command(cmd):
             else:
                 set_status(f"Substituted {count_replaced} occurrence(s)")
 
-    elif command in ('make', 'build'):
+    elif command_key in ('make', 'build'):
         safe_call(N10X.Editor.ExecuteCommand, "BuildActiveWorkspace")
 
-    elif command == 'copen':
+    elif command_key == 'copen':
         safe_call(N10X.Editor.ShowBuildOutput)
 
-    elif command == 'cclose':
+    elif command_key == 'cclose':
         pass  # No direct way to close build panel
 
-    elif command == 'only':
+    elif command_key == 'only':
         safe_call(N10X.Editor.SetColumnCount, 1)
 
-    elif command == 'tabnew':
+    elif command_key == 'tabnew':
         if args:
             N10X.Editor.OpenFile(args)
 
-    elif command == 'tabnext':
+    elif command_key == 'tabnext':
         safe_call(N10X.Editor.ExecuteCommand, "NextPanelTab")
 
-    elif command == 'tabprev':
+    elif command_key == 'tabprev':
         safe_call(N10X.Editor.ExecuteCommand, "PrevPanelTab")
 
-    elif command == 'help':
+    elif command_key == 'help':
         set_status("Vim mode - :w save, :q quit, :wq save+quit, :e file, /search, ?search")
 
     else:
